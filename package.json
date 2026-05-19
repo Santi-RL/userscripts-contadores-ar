@@ -1,0 +1,12 @@
+{
+  "name": "arca-login-client-selector",
+  "version": "1.0.3",
+  "private": true,
+  "type": "module",
+  "description": "Repositorio publico del userscript ARCA - Login con selector de clientes.",
+  "scripts": {
+    "test": "node tools/test-userscripts.mjs",
+    "validate": "node tools/validate-userscripts.mjs",
+    "checksum": "node tools/write-sha256sums.mjs"
+  }
+}

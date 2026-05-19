@@ -1,0 +1,44 @@
+{
+  "id": "arca-login-client-selector",
+  "name": "ARCA - Login con selector de clientes",
+  "version": "1.0.3",
+  "description": "Agrega un selector de clientes al login de ARCA con datos desde Google Sheets publico o CSV local.",
+  "targets": [
+    "https://auth.afip.gob.ar/contribuyente_/login.xhtml",
+    "https://auth.arca.gob.ar/contribuyente_/login.xhtml"
+  ],
+  "domPrefix": "tm-arca-login-client-selector",
+  "storagePrefix": "tm.arca-login-client-selector",
+  "ownedSelectors": [
+    "[data-tm-script=\"arca-login-client-selector\"]",
+    ".tm-arca-login-client-selector-root",
+    ".tm-arca-login-client-selector-selector-root",
+    ".tm-arca-login-client-selector-style"
+  ],
+  "configModes": [
+    "url",
+    "file"
+  ],
+  "requiresAuth": false,
+  "safeSmokeUrl": "https://auth.afip.gob.ar/contribuyente_/login.xhtml",
+  "homepageUrl": "https://github.com/Santi-RL/userscripts-contadores-ar",
+  "supportUrl": "https://github.com/Santi-RL/userscripts-contadores-ar/issues",
+  "distribution": {
+    "mode": "online-auto-update",
+    "source": "github-raw",
+    "updateUrl": "https://raw.githubusercontent.com/Santi-RL/userscripts-contadores-ar/main/userscripts/arca-login-client-selector/arca-login-client-selector.user.js",
+    "downloadUrl": "https://raw.githubusercontent.com/Santi-RL/userscripts-contadores-ar/main/userscripts/arca-login-client-selector/arca-login-client-selector.user.js"
+  },
+  "allowedGrants": [
+    "GM_getValue",
+    "GM_setValue",
+    "GM_deleteValue",
+    "GM_registerMenuCommand",
+    "GM_xmlhttpRequest"
+  ],
+  "allowedConnectHosts": [
+    "docs.google.com",
+    "googleusercontent.com"
+  ],
+  "coexistsWith": []
+}
