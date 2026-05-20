@@ -70,6 +70,7 @@ Maria,Perez,XX-XXXXXXXX-X
 
 También acepta:
 
+- columnas extra no usadas, por ejemplo `Record ID`
 - `Nombre completo`
 - `Razon Social`
 - `Cliente`
@@ -89,7 +90,7 @@ El botón `Borrar datos` elimina la configuración, cache y clientes guardados p
 
 - No aparece el selector: revisa que Tampermonkey este activo y que en Chrome este habilitado `Permitir secuencias de comandos del usuario`.
 - Google Sheets no carga: revisa que la hoja sea pública o visible para cualquiera con el enlace.
-- El CSV no carga: revisa que tenga columnas de nombre y CUIT/CUIL.
+- El CSV no carga: revisa que la fila 1 tenga los encabezados necesarios `Nombre`, `Apellido` y `CUIT`.
 - El sitio de ARCA cambio: abre un issue en GitHub.
 
 ## Privacidad

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ARCA - Login con selector de clientes
 // @namespace    https://github.com/Santi-RL/userscripts-contadores-ar
-// @version      1.0.3
+// @version      1.0.6
 // @description  Agrega un selector de clientes al login de ARCA con datos desde Google Sheets publico o CSV local.
 // @author       Scripts-TM
 // @match        https://auth.afip.gob.ar/contribuyente_/login.xhtml
@@ -79,6 +79,19 @@
   function normalizeHeader(value) {
     return normalizeText(value).replace(/[\s_.-]+/g, '');
   }
+
+  const DIRECT_NAME_HEADERS = [
+    'nombrecompleto',
+    'nombreyapellido',
+    'displayname',
+    'fullname',
+    'razonsocial',
+    'denominacion',
+    'cliente'
+  ];
+  const FIRST_NAME_HEADERS = ['nombre', 'firstname', 'name'];
+  const LAST_NAME_HEADERS = ['apellido', 'lastname', 'surname'];
+  const CUIT_HEADERS = ['cuit', 'cuil', 'taxid', 'documento'];
 
   function readConfig() {
     return normalizeConfig(GM_getValue(storageKey('config'), DEFAULT_CONFIG));
@@ -285,7 +298,7 @@
   function toggleFormatCommand() {
     if (!state.formatPanel) {
       alert(
-        'Formato CSV: columnas Nombre, Apellido y CUIT. Tambien se acepta Nombre completo, Razon Social o Cliente. Separador coma o punto y coma.'
+        'Formato CSV: columnas Nombre, Apellido y CUIT. Tambien se acepta Nombre completo, Razon Social o Cliente, y columnas extra como Record ID. Separador coma o punto y coma.'
       );
       return;
     }
@@ -445,6 +458,26 @@
     );
   }
 
+  function hasAnyHeader(headers, candidates) {
+    return candidates.some((candidate) => headers.includes(candidate));
+  }
+
+  function hasRecognizedClientHeaders(csvText) {
+    const normalizedText = String(csvText || '').replace(/^\uFEFF/, '');
+    const delimiter = detectCsvDelimiter(normalizedText);
+    const rows = parseCsv(normalizedText, delimiter);
+    if (!rows.length) return false;
+
+    const headers = rows[0].map((header) => normalizeHeader(header));
+    const hasNameHeader =
+      hasAnyHeader(headers, DIRECT_NAME_HEADERS) ||
+      hasAnyHeader(headers, FIRST_NAME_HEADERS) ||
+      hasAnyHeader(headers, LAST_NAME_HEADERS);
+    const hasCuitHeader = hasAnyHeader(headers, CUIT_HEADERS);
+
+    return hasNameHeader && hasCuitHeader;
+  }
+
   function parseRemotePayload(rawText, sourceLabel) {
     const trimmedText = String(rawText || '').trim();
     if (!trimmedText) {
@@ -453,6 +486,11 @@
 
     const entries = parseCsvData(trimmedText);
     if (!entries.length) {
+      if (!hasRecognizedClientHeaders(trimmedText)) {
+        throw new Error(
+          `No se detectaron los encabezados necesarios Nombre, Apellido y CUIT en la fila 1 de ${sourceLabel}.`
+        );
+      }
       throw new Error(`No se encontraron registros validos en ${sourceLabel}.`);
     }
 
@@ -514,18 +552,10 @@
   function normalizeEntry(item) {
     if (!item || typeof item !== 'object') return null;
 
-    const directName = readFirstValue(item, [
-      'nombrecompleto',
-      'nombreyapellido',
-      'displayname',
-      'fullname',
-      'razonsocial',
-      'denominacion',
-      'cliente'
-    ]);
-    const firstName = readFirstValue(item, ['nombre', 'firstname', 'name']);
-    const lastName = readFirstValue(item, ['apellido', 'lastname', 'surname']);
-    const cuit = String(readFirstValue(item, ['cuit', 'cuil', 'taxid', 'documento']))
+    const directName = readFirstValue(item, DIRECT_NAME_HEADERS);
+    const firstName = readFirstValue(item, FIRST_NAME_HEADERS);
+    const lastName = readFirstValue(item, LAST_NAME_HEADERS);
+    const cuit = String(readFirstValue(item, CUIT_HEADERS))
       .replace(/\D/g, '')
       .trim();
 
@@ -852,7 +882,7 @@
     formatPanel.className = `${DOM_PREFIX}-panel ${DOM_PREFIX}-format`;
     formatPanel.hidden = true;
     formatPanel.textContent =
-      'CSV esperado: columnas Nombre, Apellido y CUIT. Tambien acepta Nombre completo, Razon Social o Cliente. Separador coma o punto y coma. Para Excel, guardar como CSV.';
+      'CSV esperado: columnas Nombre, Apellido y CUIT. Tambien acepta Nombre completo, Razon Social o Cliente, y columnas extra como Record ID. Separador coma o punto y coma. Para Excel, guardar como CSV.';
 
     const searchInput = document.createElement('input');
     searchInput.type = 'text';

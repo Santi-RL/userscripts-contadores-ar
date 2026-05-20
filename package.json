@@ -1,6 +1,6 @@
 {
   "name": "arca-login-client-selector",
-  "version": "1.0.3",
+  "version": "1.0.6",
   "private": true,
   "type": "module",
   "description": "Repositorio publico del userscript ARCA - Login con selector de clientes.",

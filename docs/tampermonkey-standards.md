@@ -20,7 +20,7 @@ Estas reglas combinan documentacion oficial de Tampermonkey con decisiones de se
 - En modo `online-auto-update`, `@updateURL` y `@downloadURL` deben coincidir exactamente con `distribution.updateUrl` y `distribution.downloadUrl`.
 - En modo `manual`, `@downloadURL` debe ser `none` y `@updateURL` no debe existir.
 - Todo script autoactualizable debe seguir aumentando `@version` en cada publicacion, porque Tampermonkey usa esa metadata para detectar updates.
-- En cada cambio publicado, sincronizar `@version`, `manifest.version` y `package.json`.
+- En cada cambio publicado, sincronizar `@version`, `manifest.version`, `package.json` y `package-lock.json`.
 
 ## Permisos
 

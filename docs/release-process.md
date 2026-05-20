@@ -7,7 +7,7 @@ Publicar versiones auditables. Los scripts con auto-update deben usar URLs publi
 ## Checklist previo
 
 1. Subir `@version` del userscript en `MAJOR.MINOR.PATCH`.
-2. Sincronizar la misma version en `manifest.json` y `package.json`.
+2. Sincronizar la misma version en `manifest.json`, `package.json` y `package-lock.json`.
 3. Revisar cambios del script y su `manifest.json`.
 4. Ejecutar:
    - `npm run validate`
@@ -34,7 +34,7 @@ Publicar versiones auditables. Los scripts con auto-update deben usar URLs publi
 Usar solo cuando `manifest.json` declare `distribution.mode: "online-auto-update"`.
 
 1. Confirmar que el script no contiene PII, secretos, tokens ni datos privados.
-2. Confirmar que `@version`, manifest y `package.json` estan sincronizados.
+2. Confirmar que `@version`, manifest, `package.json` y `package-lock.json` estan sincronizados.
 3. Publicar el commit en la rama configurada en las URLs `raw.githubusercontent.com`.
 4. Verificar que `distribution.updateUrl` y `distribution.downloadUrl` abren el `*.user.js` publico correcto.
 5. Instalar o actualizar desde la URL publica del script.

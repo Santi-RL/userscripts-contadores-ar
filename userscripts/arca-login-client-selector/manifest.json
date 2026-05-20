@@ -1,7 +1,7 @@
 {
   "id": "arca-login-client-selector",
   "name": "ARCA - Login con selector de clientes",
-  "version": "1.0.3",
+  "version": "1.0.6",
   "description": "Agrega un selector de clientes al login de ARCA con datos desde Google Sheets publico o CSV local.",
   "targets": [
     "https://auth.afip.gob.ar/contribuyente_/login.xhtml",

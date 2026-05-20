@@ -598,7 +598,7 @@ test('colapsa controles cuando ya hay datos cargados y permite desplegarlos desd
   assertEqual(controlsBody.hidden, true, 'Tocar el titulo otra vez debe colapsar los controles.');
 });
 
-test('importa CSV local, filtra por nombre y completa CUIT', async () => {
+test('importa CSV local con columnas extra, filtra por nombre y completa CUIT', async () => {
   const harness = createHarness();
   const events = [];
   harness.loginInput.addEventListener('input', () => events.push('input'));
@@ -611,7 +611,7 @@ test('importa CSV local, filtra por nombre y completa CUIT', async () => {
     {
       name: 'clientes.csv',
       async text() {
-        return 'Nombre;Apellido;CUIT\nJose;Alvarez;20-12345678-3\n"Empresa, SA";;30-87654321-0\n';
+        return 'Record ID;Nombre;Apellido;CUIT\n901;Jose;Alvarez;20-12345678-3\n902;"Empresa, SA";;30-87654321-0\n';
       }
     }
   ];
@@ -691,6 +691,36 @@ test('normaliza Google Sheets edit URL y carga CSV remoto anonimo', async () => 
   assertEqual(requestUrl.searchParams.get('format'), 'csv', 'La URL normalizada debe pedir CSV.');
   assertEqual(requestUrl.searchParams.get('gid'), '456', 'La URL normalizada debe conservar gid.');
   assertEqual(harness.storage.get(storageKey('dataset')).entries[0].cuit, samplePersonCuit, 'El CSV remoto debe persistirse normalizado.');
+});
+
+test('muestra error explicito cuando el CSV no tiene encabezados reconocidos', async () => {
+  const harness = createHarness({
+    remoteResponses: [
+      {
+        status: 200,
+        responseText: `Sabrina Jeanette,Acosta,${samplePersonCuit}\nEmpresa,SA,${sampleCompanyCuit}\n`
+      }
+    ]
+  });
+
+  harness.buttonByText('Google Sheets').click();
+  const urlInput = harness.document.querySelector(`.${domPrefix}-url`);
+  urlInput.value = 'https://docs.google.com/spreadsheets/d/sheetABC123/edit#gid=456';
+  harness.buttonByText('Guardar').click();
+  await harness.flush();
+
+  const status = harness.document.querySelector(`.${domPrefix}-status`);
+  assertEqual(status.dataset.error, 'true', 'Un CSV sin encabezados debe mostrarse como error.');
+  assertIncludes(
+    status.textContent,
+    'No se detectaron los encabezados necesarios Nombre, Apellido y CUIT en la fila 1',
+    'El error debe explicar que faltan encabezados reconocidos.'
+  );
+  assertIncludes(
+    status.textContent,
+    'Nombre, Apellido y CUIT',
+    'El error debe mencionar los encabezados esperados.'
+  );
 });
 
 test('rechaza origenes remotos no HTTPS o fuera de hosts permitidos', async () => {

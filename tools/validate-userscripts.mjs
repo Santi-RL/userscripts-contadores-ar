@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(rootDir, '..');
 const userscriptsDir = path.join(projectRoot, 'userscripts');
+const packageJsonPath = path.join(projectRoot, 'package.json');
+const packageLockPath = path.join(projectRoot, 'package-lock.json');
 const publicScanIgnoredDirectories = new Set([
   '.cache',
   '.git',
@@ -133,6 +135,20 @@ async function validateUserscripts() {
   const directories = await listDirectories(userscriptsDir);
   const manifests = [];
   const errors = [];
+  const packageJson = await readJson(packageJsonPath);
+  const packageLock = await readJson(packageLockPath);
+  const packageLockRootVersion = packageLock.packages?.['']?.version;
+
+  assert(
+    packageLock.version === packageJson.version,
+    '[package-lock.json] version no coincide con package.json.',
+    errors
+  );
+  assert(
+    packageLockRootVersion === packageJson.version,
+    '[package-lock.json] packages[""].version no coincide con package.json.',
+    errors
+  );
 
   for (const directory of directories) {
     const manifestPath = path.join(userscriptsDir, directory, 'manifest.json');
@@ -150,6 +166,7 @@ async function validateUserscripts() {
     assert(manifest.id === directory, `[${directory}] El id del manifest debe coincidir con el nombre de carpeta.`, errors);
     assert(metadata.get('name') === manifest.name, `[${directory}] @name no coincide con manifest.name.`, errors);
     assert(metadata.get('version') === manifest.version, `[${directory}] @version no coincide con manifest.version.`, errors);
+    assert(manifest.version === packageJson.version, `[${directory}] manifest.version no coincide con package.json.`, errors);
     assert(metadata.get('description') === manifest.description, `[${directory}] @description no coincide con manifest.description.`, errors);
     assert(metadata.get('homepageURL') === manifest.homepageUrl, `[${directory}] @homepageURL no coincide con el manifest.`, errors);
     assert(metadata.get('supportURL') === manifest.supportUrl, `[${directory}] @supportURL no coincide con el manifest.`, errors);
