@@ -165,6 +165,13 @@ class FakeElement {
     return [];
   }
 
+  getClientRects() {
+    for (let node = this; node; node = node.parentElement) {
+      if (node.hidden || node.style.display === 'none') return [];
+    }
+    return this.isConnected && this.type !== 'hidden' ? [{}] : [];
+  }
+
   get value() {
     if (this.tagName === 'SELECT') {
       return this.options[this.selectedIndex]?.value || '';
@@ -409,22 +416,36 @@ function createHarness(options = {}) {
   const remoteResponses = [...(options.remoteResponses || [])];
   const promptResponses = [...(options.promptResponses || [])];
   const loginInput = document.createElement('input');
+  const panel = options.form ? document.createElement('div') : document.body;
+  const form = options.form ? document.createElement('form') : document.body;
+  if (options.form) {
+    form.id = 'F1';
+    panel.appendChild(form);
+    document.body.appendChild(panel);
+  }
   loginInput.id = 'F1:username';
   loginInput.name = 'F1:username';
   loginInput.type = 'text';
-  document.body.appendChild(loginInput);
+  form.appendChild(loginInput);
 
   const nextButton = document.createElement('button');
   nextButton.textContent = 'Siguiente';
-  document.body.appendChild(nextButton);
+  form.appendChild(nextButton);
 
   const helpLink = document.createElement('a');
   helpLink.textContent = 'Ayuda';
-  document.body.appendChild(helpLink);
+  form.appendChild(helpLink);
 
   const footer = document.createElement('div');
   footer.textContent = 'Pie';
-  document.body.appendChild(footer);
+  form.appendChild(footer);
+
+  const observers = [];
+  window.getComputedStyle = (element) => ({
+    display: element.style.display || 'block',
+    visibility: element.style.visibility || 'visible'
+  });
+  options.beforeScript?.({ document, loginInput, form, panel });
 
   const context = {
     console: {
@@ -440,6 +461,11 @@ function createHarness(options = {}) {
     URLSearchParams,
     Event: FakeEvent,
     Option: FakeOption,
+    MutationObserver: class {
+      constructor(callback) { this.callback = callback; observers.push(this); }
+      observe(target, settings) { this.target = target; this.settings = settings; this.active = true; }
+      disconnect() { this.active = false; }
+    },
     Date: options.now === undefined ? Date : class extends Date {
       static now() { return options.now; }
     },
@@ -534,6 +560,14 @@ function createHarness(options = {}) {
     fileReaders,
     warnings,
     window,
+    form,
+    panel,
+    observers,
+    notifyStepChange(target = form, type = 'attributes', nodes = []) {
+      for (const observer of observers.filter((item) => item.active)) {
+        observer.callback([{ target, type, addedNodes: nodes, removedNodes: [] }]);
+      }
+    },
     buttonByText(text) {
       return document.querySelectorAll('button').find((button) => button.textContent === text);
     },
@@ -965,6 +999,140 @@ test('convierte un enlace publicado pubhtml en CSV conservando la pestaña', asy
   assertEqual(url.searchParams.get('output'), 'csv', 'El enlace publicado debe solicitar CSV.');
   assertEqual(url.searchParams.get('gid'), '42', 'Debe conservar el gid del fragmento.');
   assertEqual(url.hash, '', 'El gid debe viajar al servidor, no quedar en el fragmento.');
+});
+
+test('ubica Siguiente de tipo input sin leer una clave oculta anterior', () => {
+  const harness = createHarness({ form: true, beforeScript({ document, form }) {
+    form.querySelector('button').remove();
+    const password = document.createElement('input');
+    password.type = 'password';
+    password.hidden = true;
+    Object.defineProperty(password, 'value', { get() { throw Error('Se leyó una clave oculta'); } });
+    const next = document.createElement('input');
+    next.id = 'next-input';
+    next.type = 'submit';
+    next.value = 'Siguiente';
+    form.appendChild(password);
+    form.appendChild(next);
+  } });
+  const selector = harness.document.querySelector(`.${domPrefix}-selector-root`);
+  assert(selector, 'Debe activar el selector con CUIT visible y clave oculta.');
+  assertEqual(selector.nextSibling.id, 'next-input', 'Debe insertarse antes del botón Siguiente.');
+  harness.window.dispatchEvent(new FakeEvent('pagehide'));
+});
+
+test('Recargar conserva un CUIT escrito antes de iniciar la descarga, incluso si falla', async () => {
+  for (const failed of [false, true]) {
+    const harness = createHarness({ storage: remoteStorage(Date.now()), manualRequests: true });
+    const manualCuit = ['23', '98765432', '1'].join('');
+    harness.loginInput.value = manualCuit;
+    harness.buttonByText('Recargar').click();
+    if (failed) harness.requests[0].onerror();
+    else harness.requests[0].onload({ status: 200, responseText: syntheticCsv });
+    await harness.flush();
+    assertEqual(harness.loginInput.value, manualCuit, 'La recarga no debe reemplazar un CUIT manual anterior.');
+    harness.window.dispatchEvent(new FakeEvent('pagehide'));
+  }
+});
+
+test('el paso de clave no crea interfaz ni lee contraseñas, incluso con CUIT visible', () => {
+  for (const type of ['password', 'text']) {
+    const harness = createHarness({ form: true, beforeScript({ document, form }) {
+      const password = document.createElement('input');
+      password.id = 'F1:password';
+      password.type = type;
+      password.autocomplete = 'current-password';
+      Object.defineProperty(password, 'value', { get() { throw Error('Se leyó la clave'); } });
+      form.appendChild(password);
+    } });
+    assert(!harness.document.querySelector(`.${domPrefix}-root`), 'No debe haber controles en el paso de clave.');
+    assert(!harness.document.querySelector(`.${domPrefix}-selector-root`), 'No debe haber buscador.');
+    assertEqual(harness.storageReads.get(storageKey('dataset')) || 0, 0, 'No debe cargar clientes en el paso de clave.');
+    harness.window.dispatchEvent(new FakeEvent('pagehide'));
+  }
+});
+
+test('ignora CUIT oculto, de solo lectura o dentro de un bloque invisible', () => {
+  const setups = [
+    ({ loginInput }) => { loginInput.hidden = true; },
+    ({ loginInput }) => { loginInput.type = 'hidden'; },
+    ({ loginInput }) => { loginInput.readOnly = true; },
+    ({ form }) => { form.style.display = 'none'; },
+    ({ form }) => { form.style.visibility = 'hidden'; }
+  ];
+  for (const beforeScript of setups) {
+    const harness = createHarness({ form: true, beforeScript });
+    assert(!harness.document.querySelector(`.${domPrefix}-selector-root`), 'Un CUIT no editable o invisible no activa el selector.');
+    harness.window.dispatchEvent(new FakeEvent('pagehide'));
+  }
+});
+
+test('retira la UI al pasar a clave, cancela la descarga y restaura CUIT sin duplicados', async () => {
+  const harness = createHarness({ storage: remoteStorage(Date.now() - refreshTtl), form: true, manualRequests: true });
+  await harness.flush();
+  const oldSearch = harness.document.querySelector(`.${domPrefix}-input`);
+  const password = harness.document.createElement('input');
+  password.id = 'F1:password';
+  password.type = 'password';
+  Object.defineProperty(password, 'value', { get() { throw Error('Se leyó la clave'); } });
+  harness.loginInput.hidden = true;
+  harness.form.appendChild(password);
+  harness.notifyStepChange();
+  await harness.flush();
+  assert(!harness.document.querySelector(`.${domPrefix}-selector-root`), 'Debe retirar el buscador al pasar a clave.');
+  assert(!harness.document.querySelector(`.${domPrefix}-root`), 'Debe retirar también los controles.');
+  assert(!harness.document.querySelector(`style.${domPrefix}-style`), 'Debe liberar los estilos.');
+  assert(harness.requests[0].aborted, 'Debe cancelar la descarga pendiente.');
+  assertEqual((oldSearch.listeners.get('input') || []).length, 0, 'Debe liberar los listeners del buscador.');
+  password.remove();
+  harness.loginInput.hidden = false;
+  harness.notifyStepChange();
+  await harness.flush();
+  harness.notifyStepChange();
+  await harness.flush();
+  assertEqual(harness.document.querySelectorAll(`.${domPrefix}-selector-root`).length, 1, 'El regreso a CUIT reconstruye una sola interfaz.');
+  assertEqual(harness.observers.length, 1, 'Debe reutilizar un único observer del panel.');
+  assertEqual(harness.observers[0].target, harness.panel, 'Debe observar únicamente el panel del login.');
+  assert(!harness.observers[0].settings.attributeFilter.includes('value'), 'No debe observar valores escritos.');
+  harness.window.dispatchEvent(new FakeEvent('pagehide'));
+  assert(!harness.observers[0].active, 'pagehide debe desconectar la observación.');
+});
+
+test('una respuesta durante el cambio de tipo del campo no lee ni sobrescribe la clave', async () => {
+  const harness = createHarness({ storage: remoteStorage(Date.now() - refreshTtl), form: true, manualRequests: true });
+  harness.loginInput.type = 'password';
+  harness.loginInput.autocomplete = 'current-password';
+  let passwordAccesses = 0;
+  Object.defineProperty(harness.loginInput, 'value', {
+    get() { passwordAccesses++; throw Error('Se leyó la clave'); },
+    set() { passwordAccesses++; throw Error('Se escribió la clave'); }
+  });
+  // Resolve before observer cleanup to exercise the asynchronous transition race.
+  harness.requests[0].onload({ status: 200, responseText: syntheticCsv });
+  await harness.flush();
+  assertEqual(passwordAccesses, 0, 'La respuesta no debe acceder al valor de un campo convertido en clave.');
+  assertEqual(harness.storage.get(storageKey('dataset')).entries[0].cuit, sampleCompanyCuit, 'La respuesta del paso anterior debe descartarse.');
+  harness.notifyStepChange();
+  await harness.flush();
+  assert(!harness.document.querySelector(`.${domPrefix}-root`), 'La transición debe retirar la UI.');
+  harness.window.dispatchEvent(new FakeEvent('pagehide'));
+});
+
+test('no confunde su buscador con CUIT al quitar o reemplazar el campo nativo', async () => {
+  const harness = createHarness({ form: true });
+  harness.loginInput.remove();
+  harness.notifyStepChange(harness.form, 'childList', [harness.loginInput]);
+  await harness.flush();
+  assert(!harness.document.querySelector(`.${domPrefix}-selector-root`), 'Su propio placeholder CUIT no debe mantener activa la interfaz.');
+  const replacement = harness.document.createElement('input');
+  replacement.name = 'nuevo-cuit';
+  replacement.placeholder = 'CUIT/CUIL';
+  replacement.type = 'number';
+  harness.form.insertBefore(replacement, harness.nextButton);
+  harness.notifyStepChange(harness.form, 'childList', [replacement]);
+  await harness.flush();
+  assertEqual(harness.document.querySelectorAll(`.${domPrefix}-selector-root`).length, 1, 'Debe aceptar el nuevo campo visible.');
+  harness.window.dispatchEvent(new FakeEvent('pagehide'));
 });
 
 function assertParseableJavaScript(currentScriptText, directory) {

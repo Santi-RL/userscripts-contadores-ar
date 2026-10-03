@@ -30,9 +30,9 @@ Los datos de clientes quedan guardados en Tampermonkey y normalmente se conserva
 
 ## Uso
 
-Versión actual: **1.0.7**.
+Versión actual: **1.0.8**.
 
-Al abrir el login de ARCA aparece un selector de clientes.
+El selector y sus controles aparecen únicamente cuando el campo CUIT/CUIL está visible y se puede editar. Al pasar al paso de clave se retiran, aunque la URL siga siendo la misma. Al regresar al CUIT, el selector vuelve a aparecer sin duplicarse.
 
 Tenés dos formas de cargar datos:
 
@@ -57,7 +57,7 @@ Al abrir el login, el script muestra inmediatamente la lista guardada. Si pasaro
 
 La fecha de la última actualización aparece debajo del selector. Si Google no responde, podés seguir usando la lista anterior y el script muestra un aviso. El plazo de 24 horas se comprueba al abrir el login: no hay consultas periódicas en segundo plano ni sincronización con el navegador cerrado.
 
-Si escribís un CUIT manualmente mientras se actualiza la lista, la respuesta no reemplaza lo que escribiste. También se admiten enlaces de hojas publicadas que terminan en `pub` o `pubhtml`.
+Si escribís un CUIT manualmente antes de presionar `Recargar` o mientras se actualiza la lista, la respuesta no reemplaza lo que escribiste. También se admiten enlaces de hojas publicadas que terminan en `pub` o `pubhtml`.
 
 Si HubSpot o n8n agregan una fila, aparece en la siguiente descarga correcta. Para usar un cliente recién agregado sin esperar al día siguiente, abrí los controles y presioná `Recargar`. Las columnas `Nombre`, `Apellido` y `CUIT` se leen de la pestaña indicada por el `gid` del enlace; `Record ID` y las demás columnas se ignoran.
 
@@ -102,9 +102,9 @@ Las lecturas de archivos locales se pueden cancelar: borrar los datos, cambiar d
 
 ## Rendimiento
 
-El script solo se ejecuta en las URLs del login de ARCA/AFIP declaradas en su metadata. No usa consultas continuas ni observadores permanentes del DOM. Reutiliza los datos en memoria durante la búsqueda, limita las opciones visibles a 100 y espera 120 ms después de la última tecla antes de filtrar.
+El script solo se ejecuta en las URLs del login de ARCA/AFIP declaradas en su metadata. No usa consultas continuas. Un único observador acotado al panel del login detecta cambios de paso; ignora los cambios de la interfaz propia y no observa los valores escritos en los campos. Reutiliza los datos en memoria durante la búsqueda, limita las opciones visibles a 100 y espera 120 ms después de la última tecla antes de filtrar.
 
-Al salir de la página, cancela las solicitudes pendientes, limpia los temporizadores y libera los nodos y listeners de la interfaz. Si el navegador restaura el login al volver con `Atrás`, reconstruye el selector.
+Al pasar a la clave, cancela las solicitudes pendientes y libera la lista en memoria, los nodos y los listeners de la interfaz; conserva la configuración y la caché guardadas. Al salir de la página, también desconecta el observador y limpia los temporizadores. Si el navegador restaura el login al volver con `Atrás`, reconstruye el selector.
 
 Estas medidas reducen el trabajo del selector, pero no establecen un consumo fijo de RAM para Chrome o Tampermonkey.
 

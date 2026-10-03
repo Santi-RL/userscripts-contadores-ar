@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ARCA - Login con selector de clientes
 // @namespace    https://github.com/Santi-RL/userscripts-contadores-ar
-// @version      1.0.7
+// @version      1.0.8
 // @description  Agrega un selector de clientes al login de ARCA con datos desde Google Sheets público o CSV local.
 // @author       Scripts-TM
 // @match        https://auth.afip.gob.ar/contribuyente_/login.xhtml
@@ -66,6 +66,8 @@
     pendingRequest: null,
     inputTimer: null,
     bootTimer: null,
+    stepObserver: null,
+    stepTimer: null,
     requestToken: 0
   };
 
@@ -329,7 +331,8 @@
     setEntries([]);
 
     if (state.searchInput) state.searchInput.value = '';
-    if (state.inputField) state.inputField.value = '';
+    const inputField = getActiveCuitInput();
+    if (inputField) inputField.value = '';
 
     hideConfigPanel();
     if (state.root) {
@@ -832,12 +835,18 @@
   }
 
   function nodeText(element) {
-    return normalizeText([element.textContent, element.value, element.getAttribute('aria-label')].join(' ')).trim();
+    const isButton = element.tagName === 'BUTTON' ||
+      (element.tagName === 'INPUT' && ['button', 'submit'].includes(element.type));
+    const value = isButton ? element.value : '';
+    return normalizeText([element.textContent, value, element.getAttribute('aria-label')].join(' ')).trim();
   }
 
   function findNextButtonInsertionTarget(inputField) {
-    const candidates = ['button', 'input', 'a'].flatMap((selector) => Array.from(document.querySelectorAll(selector)));
-    const nextButton = candidates.find((element) => isAfterReference(inputField, element) && nodeText(element) === 'siguiente');
+    const candidates = ['button', 'input', 'a']
+      .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+      .filter((element) => element.tagName !== 'INPUT' || ['button', 'submit'].includes(element.type));
+    const nextButton = candidates.find((element) => !isOwnedNode(element) && isVisible(element) &&
+      isAfterReference(inputField, element) && nodeText(element) === 'siguiente');
     if (!nextButton?.parentElement) return null;
 
     return {
@@ -1087,12 +1096,14 @@
 
   function renderMatches({ preserveSelection = false, preserveInput = false } = {}) {
     if (!state.select || !state.inputField || !state.searchInput || !state.count) return;
+    const inputField = getActiveCuitInput();
+    if (!inputField) return;
 
     const searchText = state.searchInput.value.trim();
     const normalizedSearch = normalizeText(searchText);
     const cuitSearch = searchText.replace(/\D/g, '');
     const lastSelectedCuit = preserveInput
-      ? String(state.inputField.value || '').replace(/\D/g, '')
+      ? String(inputField.value || '').replace(/\D/g, '')
       : readSelectedCuit();
 
     const matches = [];
@@ -1147,16 +1158,17 @@
   }
 
   function applySelectedCuit(cuit) {
-    if (!state.inputField) return;
+    const inputField = getActiveCuitInput();
+    if (!inputField) return;
     const normalizedCuit = String(cuit || '').replace(/\D/g, '');
-    state.inputField.value = normalizedCuit;
+    inputField.value = normalizedCuit;
     if (normalizedCuit) {
       if (readSelectedCuit() !== normalizedCuit) writeSelectedCuit(normalizedCuit);
     } else {
       if (readSelectedCuit()) clearSelectedCuit();
     }
-    state.inputField.dispatchEvent(new Event('input', { bubbles: true }));
-    state.inputField.dispatchEvent(new Event('change', { bubbles: true }));
+    inputField.dispatchEvent(new Event('input', { bubbles: true }));
+    inputField.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
   function handleSearchInput() {
@@ -1319,11 +1331,12 @@
 
     setLoading(true);
     updateStatus('Actualizando Google Sheets...', false);
-    const inputAtRequest = state.inputField?.value;
+    const preserveInputAtRequest = hasManualInput();
+    const inputAtRequest = readCurrentCuit();
 
     try {
       const remoteText = await fetchRemoteText(config.sourceUrl);
-      if (token !== state.requestToken) return;
+      if (token !== state.requestToken || !getActiveCuitInput()) return;
 
       const htmlError = explainHtmlResponse(remoteText);
       if (htmlError) {
@@ -1339,16 +1352,16 @@
       });
       updateHint();
       setEntries(entries);
-      renderMatches({ preserveInput: state.inputField?.value !== inputAtRequest });
+      renderMatches({ preserveInput: preserveInputAtRequest || readCurrentCuit() !== inputAtRequest });
       updateStatus(`Google Sheets actualizado (${entries.length} registros).`, false);
       syncControlsVisibility();
     } catch (error) {
-      if (token !== state.requestToken) return;
+      if (token !== state.requestToken || !getActiveCuitInput()) return;
       console.warn(`[${SCRIPT_ID}] Error cargando Google Sheets:`, error);
 
       if (datasetMatchesConfig(config, cachedDataset) && cachedDataset.entries.length) {
         setEntries(cachedDataset.entries);
-        renderMatches({ preserveInput: state.inputField?.value !== inputAtRequest });
+        renderMatches({ preserveInput: preserveInputAtRequest || readCurrentCuit() !== inputAtRequest });
         updateStatus(
           `Se usó la lista guardada (${cachedDataset.entries.length} registros). ${error.message}`,
           true
@@ -1356,7 +1369,7 @@
         syncControlsVisibility();
       } else {
         setEntries([]);
-        renderMatches({ preserveInput: state.inputField?.value !== inputAtRequest });
+        renderMatches({ preserveInput: preserveInputAtRequest || readCurrentCuit() !== inputAtRequest });
         updateStatus(error.message || 'No se pudieron cargar los datos remotos.', true);
         syncControlsVisibility();
       }
@@ -1370,11 +1383,35 @@
   function isUsableTextInput(element) {
     if (!element || element.tagName !== 'INPUT') return false;
     const type = String(element.getAttribute('type') || 'text').toLowerCase();
-    return ['', 'text', 'tel', 'search', 'number'].includes(type) && !element.disabled;
+    return ['', 'text', 'tel', 'search', 'number'].includes(type) &&
+      !element.disabled && !element.readOnly && !isOwnedNode(element) && isVisible(element);
+  }
+
+  function isOwnedNode(element) {
+    for (let node = element; node; node = node.parentElement) {
+      if (node.getAttribute?.('data-tm-script') === SCRIPT_ID) return true;
+    }
+    return false;
+  }
+
+  function isVisible(element) {
+    if (!element.isConnected || !element.getClientRects().length) return false;
+    for (let node = element; node; node = node.parentElement) {
+      const style = window.getComputedStyle(node);
+      if (node.hidden || style.display === 'none' ||
+          style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    }
+    return true;
+  }
+
+  function isPasswordInput(input) {
+    // Inspect only field metadata, including when the eye button reveals the key.
+    return input.type === 'password' ||
+      /password|clave/.test(inputTextSignature(input));
   }
 
   function hasManualInput() {
-    const value = String(state.inputField?.value || '').replace(/\D/g, '');
+    const value = String(readCurrentCuit() || '').replace(/\D/g, '');
     return Boolean(value && value !== readSelectedCuit());
   }
 
@@ -1393,23 +1430,34 @@
   }
 
   function findCuitInput() {
+    const inputs = Array.from(document.querySelectorAll('input'));
+    if (inputs.some((input) => !isOwnedNode(input) && isVisible(input) && isPasswordInput(input))) {
+      return null;
+    }
     const legacyInput = document.getElementById('F1:username');
     if (isUsableTextInput(legacyInput)) return legacyInput;
 
     const legacyNameInput = document.querySelector('input[name="F1:username"]');
     if (isUsableTextInput(legacyNameInput)) return legacyNameInput;
 
-    const inputs = Array.from(document.querySelectorAll('input'));
     return (
       inputs.find((input) => {
-        if (!isUsableTextInput(input)) return false;
+        if (!isUsableTextInput(input) || isPasswordInput(input)) return false;
         const signature = inputTextSignature(input);
         return signature.includes('cuit') || signature.includes('cuil');
       }) || null
     );
   }
 
-  function destroy() {
+  function getActiveCuitInput() {
+    return state.inputField && findCuitInput() === state.inputField ? state.inputField : null;
+  }
+
+  function readCurrentCuit() {
+    return getActiveCuitInput()?.value;
+  }
+
+  function removeUi() {
     cancelPendingLoad();
     for (const { target, type, handler, options } of state.listeners) {
       target.removeEventListener(type, handler, options);
@@ -1453,11 +1501,46 @@
     state.entries = [];
   }
 
-  function init() {
-    if (state.root?.isConnected) return true;
+  function destroy() {
+    state.stepObserver?.disconnect();
+    state.stepObserver = null;
+    if (state.stepTimer !== null) clearTimeout(state.stepTimer);
+    state.stepTimer = null;
+    removeUi();
+  }
 
+  function observeLoginStep() {
+    if (state.stepObserver) return true;
+    const form = document.getElementById('F1') || document.querySelector('form');
+    const scope = form?.parentElement;
+    // Watch only the login panel, including replacement of its form; never the whole page.
+    if (!scope || scope === document.body || scope === document.documentElement) return false;
+    state.stepObserver = new MutationObserver((records) => {
+      const relevant = records.some((record) => !isOwnedNode(record.target) &&
+        (record.type !== 'childList' ||
+          [...record.addedNodes, ...record.removedNodes].some((node) => !isOwnedNode(node))));
+      if (!relevant || state.stepTimer !== null) return;
+      state.stepTimer = setTimeout(() => {
+        state.stepTimer = null;
+        if (!init() && state.root) removeUi();
+      }, 0);
+    });
+    state.stepObserver.observe(scope, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['type', 'hidden', 'style', 'class', 'readonly', 'disabled', 'autocomplete']
+    });
+    return true;
+  }
+
+  function init() {
     const inputField = findCuitInput();
     if (!inputField) return false;
+    if (state.root?.isConnected && state.selectorRoot?.isConnected && state.inputField === inputField) {
+      return true;
+    }
+    if (state.root) removeUi();
 
     const selectorInsertion = resolveSelectorInsertion(inputField);
     const controlsInsertion = resolveControlsInsertion(inputField);
@@ -1473,7 +1556,8 @@
   }
 
   function bootstrap(attempt) {
-    if (init()) return;
+    const observing = observeLoginStep();
+    if (init() || observing) return;
     if (attempt >= MAX_BOOT_ATTEMPTS) return;
 
     state.bootTimer = setTimeout(() => {

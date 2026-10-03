@@ -23,7 +23,7 @@ En Tampermonkey, usar `Importar desde URL` con la URL indicada en el manual del 
 
 Los scripts instalados desde la URL recomendada pueden autoactualizarse cuando se publique una nueva versión.
 
-El selector de clientes del login de ARCA está en la versión **1.0.7**. Muestra la lista guardada al entrar, actualiza los datos de Google Sheets cuando pasaron 24 horas desde la última descarga correcta y permite forzar la actualización con `Recargar`. La búsqueda abarca todos los clientes y muestra hasta 100 resultados a la vez. Consultá las [notas de la versión](docs/releases/1.0.7.md).
+El selector de clientes del login de ARCA está en la versión **1.0.8**. El buscador y sus controles aparecen solo en el paso de CUIT/CUIL y se retiran al pasar a la clave, aunque la URL no cambie. Muestra la lista guardada al entrar, actualiza los datos de Google Sheets cuando pasaron 24 horas desde la última descarga correcta y permite forzar la actualización con `Recargar`. La búsqueda abarca todos los clientes y muestra hasta 100 resultados a la vez. Consultá las [notas de la versión](docs/releases/1.0.8.md).
 
 ## Seguridad
 
