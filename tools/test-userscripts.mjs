@@ -46,6 +46,7 @@ class FakeEvent {
     this.type = type;
     this.bubbles = Boolean(options.bubbles);
     this.key = options.key || '';
+    this.persisted = Boolean(options.persisted);
     this.defaultPrevented = false;
     this.target = null;
     this.currentTarget = null;
@@ -274,6 +275,14 @@ class FakeElement {
     this.listeners.set(type, listeners);
   }
 
+  removeEventListener(type, handler) {
+    const listeners = this.listeners.get(type) || [];
+    this.listeners.set(
+      type,
+      listeners.filter((listener) => listener.handler !== handler)
+    );
+  }
+
   dispatchEvent(event) {
     event.target = event.target || this;
     event.currentTarget = this;
@@ -363,6 +372,14 @@ class FakeWindow {
     this.listeners.set(type, listeners);
   }
 
+  removeEventListener(type, handler) {
+    const listeners = this.listeners.get(type) || [];
+    this.listeners.set(
+      type,
+      listeners.filter((listener) => listener.handler !== handler)
+    );
+  }
+
   dispatchEvent(event) {
     event.target = event.target || this;
     const listeners = [...(this.listeners.get(event.type) || [])];
@@ -385,6 +402,8 @@ function createHarness(options = {}) {
   const storage = new Map(Object.entries(options.storage || {}));
   const menuCommands = new Map();
   const requests = [];
+  const storageReads = new Map();
+  const fileReaders = [];
   const alerts = [];
   const warnings = [];
   const remoteResponses = [...(options.remoteResponses || [])];
@@ -421,6 +440,29 @@ function createHarness(options = {}) {
     URLSearchParams,
     Event: FakeEvent,
     Option: FakeOption,
+    Date: options.now === undefined ? Date : class extends Date {
+      static now() { return options.now; }
+    },
+    FileReader: class {
+      constructor() {
+        this.result = null;
+        this.aborted = false;
+        fileReaders.push(this);
+      }
+      readAsText(file) {
+        Promise.resolve(file.text()).then((text) => {
+          if (this.aborted) return;
+          this.result = text;
+          this.onload?.();
+        }, () => {
+          if (!this.aborted) this.onerror?.();
+        });
+      }
+      abort() {
+        this.aborted = true;
+        this.onabort?.();
+      }
+    },
     setTimeout,
     clearTimeout,
     prompt() {
@@ -433,6 +475,7 @@ function createHarness(options = {}) {
       alerts.push(String(message));
     },
     GM_getValue(key, defaultValue) {
+      storageReads.set(key, (storageReads.get(key) || 0) + 1);
       return storage.has(key) ? storage.get(key) : defaultValue;
     },
     GM_setValue(key, value) {
@@ -447,7 +490,7 @@ function createHarness(options = {}) {
     GM_xmlhttpRequest(request) {
       requests.push(request);
       const response = remoteResponses.shift() || { status: 200, responseText: '' };
-      setTimeout(() => {
+      const respond = () => {
         if (response.timeout) {
           request.ontimeout?.();
         } else if (response.error) {
@@ -458,9 +501,14 @@ function createHarness(options = {}) {
             responseText: response.responseText ?? ''
           });
         }
-      }, 0);
+      };
+      const timer = options.manualRequests ? null : setTimeout(respond, response.delayMs || 0);
       return {
-        abort() {}
+        abort() {
+          request.aborted = true;
+          if (timer !== null) clearTimeout(timer);
+          request.onabort?.();
+        }
       };
     }
   };
@@ -482,6 +530,8 @@ function createHarness(options = {}) {
     nextButton,
     requests,
     storage,
+    storageReads,
+    fileReaders,
     warnings,
     window,
     buttonByText(text) {
@@ -737,6 +787,186 @@ test('rechaza origenes remotos no HTTPS o fuera de hosts permitidos', async () =
   assertEqual(status.dataset.error, 'true', 'Una URL invalida debe mostrarse como error.');
 });
 
+const refreshTtl = 24 * 60 * 60 * 1000;
+const syntheticSheetUrl = 'https://docs.google.com/spreadsheets/d/testSheet/export?format=csv&gid=0';
+const syntheticEntry = { name: 'Cliente de prueba', cuit: sampleCompanyCuit, searchKey: `cliente de prueba ${sampleCompanyCuit}` };
+const syntheticCsv = `Nombre,CUIT\nCliente nuevo,${samplePersonCuit}\n`;
+
+function remoteStorage(loadedAt) {
+  return {
+    [storageKey('config')]: { sourceMode: 'url', sourceUrl: syntheticSheetUrl },
+    [storageKey('dataset')]: { sourceMode: 'url', sourceUrl: syntheticSheetUrl, loadedAt, entries: [syntheticEntry] },
+    [storageKey('selectedCuit')]: sampleCompanyCuit
+  };
+}
+
+test('usa la caché reciente sin red y conserva el último cliente seleccionado', async () => {
+  const now = 2_000_000_000_000;
+  const harness = createHarness({ now, storage: remoteStorage(now - refreshTtl + 1) });
+  await harness.flush();
+  assertEqual(harness.requests.length, 0, 'Una caché de menos de 24 horas no debe descargarse de nuevo.');
+  assertEqual(harness.loginInput.value, sampleCompanyCuit, 'Debe restaurar el cliente guardado desde la primera carga.');
+  assertEqual(harness.storage.get(storageKey('selectedCuit')), sampleCompanyCuit, 'El inicio no debe borrar la selección.');
+  assertIncludes(harness.document.querySelector(`.${domPrefix}-hint`).textContent, 'Última actualización:', 'Debe mostrar la fecha de sincronización.');
+});
+
+test('actualiza a las 24 horas y permite usar la lista anterior mientras descarga', async () => {
+  const now = 2_000_000_000_000;
+  const harness = createHarness({ now, storage: remoteStorage(now - refreshTtl), manualRequests: true });
+  assertEqual(harness.requests.length, 1, 'Al cumplir 24 horas debe actualizarse.');
+  assertEqual(harness.loginInput.value, sampleCompanyCuit, 'La caché debe estar disponible sin esperar la respuesta.');
+  harness.requests[0].onload({ status: 200, responseText: syntheticCsv });
+  await harness.flush();
+  assertEqual(harness.storage.get(storageKey('dataset')).loadedAt, now, 'Debe guardar la fecha de la descarga correcta.');
+  assertEqual(harness.storage.get(storageKey('dataset')).entries[0].cuit, samplePersonCuit, 'Debe incorporar el cliente nuevo.');
+});
+
+test('Recargar fuerza una descarga aunque la caché siga vigente', async () => {
+  const now = 2_000_000_000_000;
+  const harness = createHarness({ now, storage: remoteStorage(now), remoteResponses: [{ responseText: syntheticCsv }] });
+  harness.buttonByText('Recargar').click();
+  await harness.flush();
+  assertEqual(harness.requests.length, 1, 'Recargar debe ignorar el TTL.');
+  assertEqual(harness.storage.get(storageKey('dataset')).entries[0].cuit, samplePersonCuit, 'Recargar debe guardar los datos nuevos.');
+});
+
+test('rechaza timestamps futuros o ausentes como caché vigente y conserva la lista ante errores', async () => {
+  const now = 2_000_000_000_000;
+  for (const loadedAt of [undefined, now + 1]) {
+    const harness = createHarness({ now, storage: remoteStorage(loadedAt), remoteResponses: [{ error: true }] });
+    await harness.flush();
+    assertEqual(harness.requests.length, 1, 'Una fecha inválida debe forzar la actualización.');
+    assertEqual(harness.loginInput.value, sampleCompanyCuit, 'Una caída de Google no debe eliminar la lista guardada.');
+    assertIncludes(harness.document.querySelector(`.${domPrefix}-status`).textContent, 'Se usó la lista guardada', 'Debe informar el uso de datos anteriores.');
+    assertEqual(harness.storage.get(storageKey('dataset')).loadedAt, loadedAt, 'Un fallo no debe renovar la fecha de carga.');
+  }
+});
+
+test('borrar datos aborta la descarga y descarta respuestas tardías', async () => {
+  const harness = createHarness({ storage: remoteStorage(0), manualRequests: true });
+  const oldRequest = harness.requests[0];
+  harness.buttonByText('Borrar datos').click();
+  assertEqual(oldRequest.aborted, true, 'Borrar debe abortar la solicitud activa.');
+  oldRequest.onload({ status: 200, responseText: syntheticCsv });
+  await harness.flush();
+  assert(!harness.storage.has(storageKey('dataset')), 'Una respuesta tardía no debe recuperar los datos borrados.');
+  assert(!harness.storage.has(storageKey('config')), 'La configuración debe permanecer borrada.');
+});
+
+test('importar CSV invalida la solicitud remota anterior', async () => {
+  const harness = createHarness({ storage: remoteStorage(0), manualRequests: true });
+  const oldRequest = harness.requests[0];
+  harness.buttonByText('Importar CSV').click();
+  const input = harness.document.querySelector('input[type="file"]');
+  input.files = [{ name: 'clientes-sinteticos.csv', async text() { return syntheticCsv; } }];
+  input.dispatchEvent(new FakeEvent('change'));
+  await harness.flush();
+  oldRequest.onload({ status: 200, responseText: `Nombre,CUIT\nAntiguo,${sampleCompanyCuit}\n` });
+  await harness.flush();
+  assertEqual(oldRequest.aborted, true, 'Importar debe abortar la descarga previa.');
+  assertEqual(harness.storage.get(storageKey('config')).sourceMode, 'file', 'Debe conservar el origen local.');
+  assertEqual(harness.storage.get(storageKey('dataset')).sourceMode, 'file', 'El dataset debe corresponder al CSV importado.');
+  assertEqual(harness.storage.get(storageKey('dataset')).entries[0].cuit, samplePersonCuit, 'La respuesta remota no debe sobrescribir el archivo.');
+});
+
+test('borrar mientras se lee un archivo impide guardar su contenido después', async () => {
+  const harness = createHarness();
+  let finishRead;
+  harness.buttonByText('Importar CSV').click();
+  const input = harness.document.querySelector('input[type="file"]');
+  input.files = [{ name: 'lento.csv', text() { return new Promise((resolve) => { finishRead = resolve; }); } }];
+  input.dispatchEvent(new FakeEvent('change'));
+  harness.buttonByText('Borrar datos').click();
+  assertEqual(harness.fileReaders[0].aborted, true, 'Debe detener la lectura pendiente del archivo.');
+  finishRead(syntheticCsv);
+  await harness.flush();
+  assert(!harness.storage.has(storageKey('dataset')), 'La lectura pendiente no debe deshacer el borrado.');
+});
+
+test('cambiar de fuente descarta el error anterior sin vaciar la carga nueva', async () => {
+  const harness = createHarness({ storage: remoteStorage(0), manualRequests: true });
+  const oldRequest = harness.requests[0];
+  harness.buttonByText('Google Sheets').click();
+  harness.document.querySelector(`.${domPrefix}-url`).value = syntheticSheetUrl.replace('testSheet', 'otherTestSheet');
+  harness.buttonByText('Guardar').click();
+  harness.requests[1].onload({ status: 200, responseText: syntheticCsv });
+  await harness.flush();
+  oldRequest.onerror();
+  await harness.flush();
+  assertEqual(harness.document.querySelector(`.${domPrefix}-select`).options.length, 2, 'El error antiguo no debe vaciar la lista nueva.');
+  assertEqual(harness.document.querySelector(`.${domPrefix}-status`).dataset.error, 'false', 'El error antiguo no debe reemplazar el estado correcto.');
+});
+
+test('pagehide cancela solicitudes y pageshow restaura la UI sin duplicarla', async () => {
+  const harness = createHarness({ storage: remoteStorage(0), manualRequests: true });
+  const oldRequest = harness.requests[0];
+  harness.window.dispatchEvent(new FakeEvent('pagehide', { persisted: true }));
+  assertEqual(oldRequest.aborted, true, 'Salir debe abortar la solicitud pendiente.');
+  oldRequest.onload({ status: 200, responseText: syntheticCsv });
+  await harness.flush();
+  assertEqual(harness.storage.get(storageKey('dataset')).loadedAt, 0, 'Una respuesta tras salir no debe cambiar el storage.');
+  harness.window.dispatchEvent(new FakeEvent('pageshow', { persisted: true }));
+  harness.window.dispatchEvent(new FakeEvent('pageshow', { persisted: true }));
+  assertEqual(harness.document.querySelectorAll(`.${domPrefix}-root`).length, 1, 'Al volver debe haber una sola UI.');
+  assertEqual(harness.requests.length, 2, 'La restauración debe reintentar la carga una sola vez.');
+  harness.window.dispatchEvent(new FakeEvent('pagehide'));
+  await harness.flush();
+});
+
+test('limita las opciones a 100, conserva una selección lejana y encuentra cualquier cliente', async () => {
+  const entries = Array.from({ length: 5000 }, (_, i) => ({ name: `Cliente ${i}`, cuit: String(20 * 1e9 + i), searchKey: `cliente ${i}` }));
+  const selected = entries[4999];
+  const harness = createHarness({ storage: {
+    [storageKey('config')]: { sourceMode: 'file', sourceUrl: '' },
+    [storageKey('dataset')]: { sourceMode: 'file', entries },
+    [storageKey('selectedCuit')]: selected.cuit
+  } });
+  const select = harness.document.querySelector(`.${domPrefix}-select`);
+  assertEqual(select.options.length, 101, 'Debe crear 100 opciones y el placeholder.');
+  assertEqual(harness.loginInput.value, selected.cuit, 'Debe conservar la selección aunque no esté entre los primeros 100.');
+  assertIncludes(harness.document.querySelector(`.${domPrefix}-count`).textContent, '100 de 5000', 'Debe informar que hay más coincidencias.');
+  const search = harness.document.querySelector(`.${domPrefix}-input`);
+  search.value = 'Cliente 4998';
+  search.dispatchEvent(new FakeEvent('input'));
+  await delay(150);
+  assertEqual(harness.loginInput.value, entries[4998].cuit, 'La búsqueda debe encontrar clientes fuera del límite inicial.');
+  assertEqual(harness.storageReads.get(storageKey('dataset')), 1, 'Buscar no debe releer el dataset completo desde storage.');
+});
+
+test('cancelar el selector de archivo elimina su nodo temporal', () => {
+  const harness = createHarness();
+  harness.buttonByText('Importar CSV').click();
+  harness.document.querySelector('input[type="file"]').dispatchEvent(new FakeEvent('cancel'));
+  assert(!harness.document.querySelector('input[type="file"]'), 'Cancelar debe limpiar el selector temporal.');
+});
+
+test('la respuesta remota respeta un CUIT escrito manualmente durante la descarga', async () => {
+  for (const failed of [false, true]) {
+    const harness = createHarness({ storage: remoteStorage(0), manualRequests: true });
+    const manualCuit = ['23', '98765432', '1'].join('');
+    harness.loginInput.value = manualCuit;
+    harness.loginInput.dispatchEvent(new FakeEvent('input'));
+    if (failed) harness.requests[0].onerror();
+    else harness.requests[0].onload({ status: 200, responseText: syntheticCsv });
+    await harness.flush();
+    assertEqual(harness.loginInput.value, manualCuit, 'Una respuesta automática no debe reemplazar el CUIT escrito por el usuario.');
+    assertEqual(harness.document.querySelector(`.${domPrefix}-select`).selectedIndex, 0, 'Si el CUIT manual no está en la lista, no debe mostrar otro cliente seleccionado.');
+  }
+});
+
+test('convierte un enlace publicado pubhtml en CSV conservando la pestaña', async () => {
+  const harness = createHarness({ remoteResponses: [{ responseText: syntheticCsv }] });
+  harness.buttonByText('Google Sheets').click();
+  harness.document.querySelector(`.${domPrefix}-url`).value = 'https://docs.google.com/spreadsheets/d/e/publishedTest/pubhtml#gid=42';
+  harness.buttonByText('Guardar').click();
+  await harness.flush();
+  const url = new URL(harness.requests[0].url);
+  assertEqual(url.pathname, '/spreadsheets/d/e/publishedTest/pub', 'El endpoint debe ser pub, no pubhtml.');
+  assertEqual(url.searchParams.get('output'), 'csv', 'El enlace publicado debe solicitar CSV.');
+  assertEqual(url.searchParams.get('gid'), '42', 'Debe conservar el gid del fragmento.');
+  assertEqual(url.hash, '', 'El gid debe viajar al servidor, no quedar en el fragmento.');
+});
+
 function assertParseableJavaScript(currentScriptText, directory) {
   try {
     new Function(currentScriptText);
@@ -754,7 +984,7 @@ function assertMetadataShape(currentScriptText, directory) {
 function assertLifecycleShape(currentScriptText, directory) {
   assert(/\bfunction\s+init\s*\(/.test(currentScriptText), `[${directory}] Falta una funcion init() explicita.`);
   assert(/\bfunction\s+destroy\s*\(/.test(currentScriptText), `[${directory}] Falta una funcion destroy() explicita.`);
-  assert(/pagehide[\s\S]*destroy\s*\(/.test(currentScriptText), `[${directory}] destroy() debe registrarse para pagehide.`);
+  assert(/pagehide['"]\s*,\s*destroy\b|pagehide[\s\S]*destroy\s*\(/.test(currentScriptText), `[${directory}] destroy() debe registrarse para pagehide.`);
 }
 
 function assertOwnedSelectorsShape(currentManifest, directory) {

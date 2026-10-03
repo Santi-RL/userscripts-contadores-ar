@@ -166,7 +166,9 @@ async function validateUserscripts() {
     assert(manifest.id === directory, `[${directory}] El id del manifest debe coincidir con el nombre de carpeta.`, errors);
     assert(metadata.get('name') === manifest.name, `[${directory}] @name no coincide con manifest.name.`, errors);
     assert(metadata.get('version') === manifest.version, `[${directory}] @version no coincide con manifest.version.`, errors);
-    assert(manifest.version === packageJson.version, `[${directory}] manifest.version no coincide con package.json.`, errors);
+    if (directory === packageJson.name) {
+      assert(manifest.version === packageJson.version, `[${directory}] manifest.version no coincide con package.json.`, errors);
+    }
     assert(metadata.get('description') === manifest.description, `[${directory}] @description no coincide con manifest.description.`, errors);
     assert(metadata.get('homepageURL') === manifest.homepageUrl, `[${directory}] @homepageURL no coincide con el manifest.`, errors);
     assert(metadata.get('supportURL') === manifest.supportUrl, `[${directory}] @supportURL no coincide con el manifest.`, errors);

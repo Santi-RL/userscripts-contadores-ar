@@ -6,7 +6,7 @@ Scripts para Chrome con la extensión de Tampermonkey para contadores.
 
 | Script | Para qué sirve | Manual |
 | --- | --- | --- |
-| ARCA - Login con selector de clientes | Busca clientes por nombre o CUIT y completa el login de clave fiscal. | [Ver manual](userscripts/arca-login-client-selector/README.md) |
+| ARCA - Login con selector de clientes | Busca clientes por nombre o CUIT y completa el CUIT/CUIL del login de clave fiscal. | [Ver manual](userscripts/arca-login-client-selector/README.md) |
 
 ## Instalación rápida
 
@@ -22,6 +22,8 @@ Esta configuración es necesaria en Chrome para que Tampermonkey pueda ejecutar 
 En Tampermonkey, usar `Importar desde URL` con la URL indicada en el manual del script.
 
 Los scripts instalados desde la URL recomendada pueden autoactualizarse cuando se publique una nueva versión.
+
+El selector de clientes del login de ARCA está en la versión **1.0.7**. Muestra la lista guardada al entrar, actualiza los datos de Google Sheets cuando pasaron 24 horas desde la última descarga correcta y permite forzar la actualización con `Recargar`. La búsqueda abarca todos los clientes y muestra hasta 100 resultados a la vez. Consultá las [notas de la versión](docs/releases/1.0.7.md).
 
 ## Seguridad
 

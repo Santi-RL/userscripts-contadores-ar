@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ARCA - Login con selector de clientes
 // @namespace    https://github.com/Santi-RL/userscripts-contadores-ar
-// @version      1.0.6
-// @description  Agrega un selector de clientes al login de ARCA con datos desde Google Sheets publico o CSV local.
+// @version      1.0.7
+// @description  Agrega un selector de clientes al login de ARCA con datos desde Google Sheets público o CSV local.
 // @author       Scripts-TM
 // @match        https://auth.afip.gob.ar/contribuyente_/login.xhtml
 // @match        https://auth.arca.gob.ar/contribuyente_/login.xhtml
@@ -32,6 +32,8 @@
   const MAX_BOOT_ATTEMPTS = 20;
   const BOOT_DELAY_MS = 250;
   const SEARCH_DEBOUNCE_MS = 120;
+  const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+  const MAX_VISIBLE_MATCHES = 100;
   const DEFAULT_CONFIG = {
     sourceMode: 'url',
     sourceUrl: ''
@@ -58,6 +60,10 @@
     formatButton: null,
     inputField: null,
     entries: [],
+    dataset: null,
+    listeners: [],
+    fileInputs: new Set(),
+    pendingRequest: null,
     inputTimer: null,
     bootTimer: null,
     requestToken: 0
@@ -126,11 +132,35 @@
   }
 
   function writeDataset(dataset) {
+    state.dataset = dataset;
     GM_setValue(storageKey('dataset'), dataset);
   }
 
   function clearDataset() {
+    state.dataset = null;
     GM_deleteValue(storageKey('dataset'));
+  }
+
+  function listen(target, type, handler, options) {
+    target.addEventListener(type, handler, options);
+    state.listeners.push({ target, type, handler, options });
+  }
+
+  function removeListenersFor(target) {
+    state.listeners = state.listeners.filter((listener) => {
+      if (listener.target !== target) return true;
+      target.removeEventListener(listener.type, listener.handler, listener.options);
+      return false;
+    });
+  }
+
+  function cancelPendingLoad() {
+    state.requestToken += 1;
+    const request = state.pendingRequest;
+    state.pendingRequest = null;
+    request?.abort();
+    setLoading(false);
+    return state.requestToken;
   }
 
   function readSelectedCuit() {
@@ -165,7 +195,7 @@
     const currentConfig = readConfig();
     const currentUrl = currentConfig.sourceUrl || 'https://docs.google.com/spreadsheets/d/...';
     const nextUrl = prompt(
-      'Pega un link publico de Google Sheets. La hoja debe ser visible para cualquiera con el enlace.',
+      'Pega un enlace público de Google Sheets. La hoja debe ser visible para cualquiera con el enlace.',
       currentUrl
     );
 
@@ -182,7 +212,7 @@
     state.configPanel.hidden = false;
     state.formatPanel.hidden = true;
     state.configInput.focus();
-    updateStatus('Pega el link publico de Google Sheets y guardalo para sincronizar.', false);
+    updateStatus('Pegá el enlace público de Google Sheets y guardalo para sincronizar.', false);
   }
 
   function hideConfigPanel() {
@@ -197,7 +227,7 @@
   function saveGoogleSheetsUrl(rawUrl) {
     const sanitizedUrl = String(rawUrl || '').trim();
     if (!sanitizedUrl) {
-      updateStatus('No se guardo ninguna URL.', true);
+      updateStatus('No se guardó ninguna URL.', true);
       return;
     }
 
@@ -205,10 +235,11 @@
     try {
       normalizedUrl = normalizeRemoteUrl(sanitizedUrl);
     } catch (error) {
-      updateStatus(error.message || 'La URL ingresada no es valida.', true);
+      updateStatus(error.message || 'La URL ingresada no es válida.', true);
       return;
     }
 
+    cancelPendingLoad();
     writeConfig({
       sourceMode: 'url',
       sourceUrl: normalizedUrl
@@ -227,15 +258,27 @@
     input.style.display = 'none';
     input.dataset.tmScript = SCRIPT_ID;
     document.body.appendChild(input);
+    state.fileInputs.add(input);
 
-    input.addEventListener(
+    const removeInput = () => {
+      removeListenersFor(input);
+      input.remove();
+      state.fileInputs.delete(input);
+    };
+    listen(input, 'cancel', removeInput, { once: true });
+
+    listen(
+      input,
       'change',
       async () => {
+        let token;
         try {
           const file = input.files && input.files[0];
           if (!file) return;
 
-          const rawText = await file.text();
+          token = cancelPendingLoad();
+          const rawText = await readLocalFile(file);
+          if (token !== state.requestToken) return;
           const entries = parseRemotePayload(rawText, file.name);
           writeConfig({
             sourceMode: 'file',
@@ -258,12 +301,13 @@
             syncControlsVisibility();
           }
         } catch (error) {
+          if (token !== undefined && token !== state.requestToken) return;
           console.warn(`[${SCRIPT_ID}] Error importando CSV:`, error);
           if (state.root) {
             updateStatus(error.message || 'No se pudo importar el CSV.', true);
           }
         } finally {
-          input.remove();
+          removeInput();
         }
       },
       { once: true }
@@ -274,10 +318,11 @@
 
   function clearConfigurationCommand() {
     const shouldClear = confirm(
-      'Borrar la configuracion, cache y clientes guardados por este script?'
+      '¿Borrar la configuración, caché y los clientes guardados por este script?'
     );
     if (!shouldClear) return;
 
+    cancelPendingLoad();
     clearDataset();
     clearSelectedCuit();
     GM_deleteValue(storageKey('config'));
@@ -295,10 +340,41 @@
     }
   }
 
+  function readLocalFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        reader.onload = null;
+        reader.onerror = null;
+        reader.onabort = null;
+        if (state.pendingRequest === pending) state.pendingRequest = null;
+        callback(value);
+      };
+      const pending = {
+        abort() {
+          finish(reject, new Error('La lectura del CSV fue cancelada.'));
+          reader.abort();
+        }
+      };
+      state.pendingRequest = pending;
+      reader.onload = () => finish(resolve, String(reader.result || ''));
+      reader.onerror = () => finish(reject, new Error('No se pudo leer el archivo CSV.'));
+      reader.onabort = () => finish(reject, new Error('La lectura del CSV fue cancelada.'));
+      try {
+        reader.readAsText(file, 'UTF-8');
+      } catch (error) {
+        finish(reject, error);
+      }
+    });
+  }
+
   function toggleFormatCommand() {
     if (!state.formatPanel) {
       alert(
-        'Formato CSV: columnas Nombre, Apellido y CUIT. Tambien se acepta Nombre completo, Razon Social o Cliente, y columnas extra como Record ID. Separador coma o punto y coma.'
+        'Formato CSV: columnas Nombre, Apellido y CUIT. También se acepta Nombre completo, Razón Social o Cliente, y columnas extra como Record ID. Separador coma o punto y coma.'
       );
       return;
     }
@@ -317,7 +393,7 @@
     try {
       url = new URL(candidate);
     } catch {
-      throw new Error('La URL ingresada no es valida.');
+      throw new Error('La URL ingresada no es válida.');
     }
 
     if (url.protocol !== 'https:') {
@@ -349,6 +425,12 @@
       url.hostname === 'docs.google.com' &&
       /^\/spreadsheets\/d\/e\/[^/]+\/pub(?:html)?$/.test(url.pathname)
     ) {
+      url.pathname = url.pathname.replace(/\/pubhtml$/, '/pub');
+      const hashParams = new URLSearchParams(url.hash.slice(1));
+      if (!url.searchParams.has('gid') && hashParams.has('gid')) {
+        url.searchParams.set('gid', readGidFromUrl(url));
+      }
+      url.hash = '';
       url.searchParams.set('output', 'csv');
       return url.toString();
     }
@@ -491,7 +573,7 @@
           `No se detectaron los encabezados necesarios Nombre, Apellido y CUIT en la fila 1 de ${sourceLabel}.`
         );
       }
-      throw new Error(`No se encontraron registros validos en ${sourceLabel}.`);
+      throw new Error(`No se encontraron registros válidos en ${sourceLabel}.`);
     }
 
     return entries;
@@ -509,7 +591,7 @@
       normalizedText.includes('inicia sesion') ||
       normalizedText.includes('sign in')
     ) {
-      return 'Google no devolvio un CSV publico. Publica la hoja o habilita acceso para cualquiera con el enlace.';
+      return 'Google no devolvió un CSV público. Publica la hoja o habilita acceso para cualquiera con el enlace.';
     }
 
     if (
@@ -519,10 +601,10 @@
       normalizedText.includes('access denied') ||
       normalizedText.includes('acceso denegado')
     ) {
-      return 'El link de Google Sheets no es publico. Usa acceso para cualquiera con el enlace o importa un CSV local.';
+      return 'El link de Google Sheets no es público. Usa acceso para cualquiera con el enlace o importa un CSV local.';
     }
 
-    return 'Google devolvio HTML en lugar de CSV. Revisa que el link sea una hoja publica o publicada como CSV.';
+    return 'Google devolvió HTML en lugar de CSV. Revisa que el link sea una hoja pública o publicada como CSV.';
   }
 
   function normalizeEntries(items) {
@@ -793,8 +875,7 @@
   }
 
   function hasLoadedDataset() {
-    const dataset = readDataset();
-    return Boolean(dataset?.entries?.length);
+    return Boolean(state.entries.length);
   }
 
   function setControlsCollapsed(isCollapsed) {
@@ -860,7 +941,7 @@
     const configNote = document.createElement('p');
     configNote.className = `${DOM_PREFIX}-note`;
     configNote.textContent =
-      'Usa un link publico de Google Sheets. Cualquiera con acceso al link puede ver esa hoja.';
+      'Usa un enlace público de Google Sheets. Cualquiera con acceso al link puede ver esa hoja.';
 
     const configInput = document.createElement('input');
     configInput.type = 'url';
@@ -882,7 +963,7 @@
     formatPanel.className = `${DOM_PREFIX}-panel ${DOM_PREFIX}-format`;
     formatPanel.hidden = true;
     formatPanel.textContent =
-      'CSV esperado: columnas Nombre, Apellido y CUIT. Tambien acepta Nombre completo, Razon Social o Cliente, y columnas extra como Record ID. Separador coma o punto y coma. Para Excel, guardar como CSV.';
+      'CSV esperado: columnas Nombre, Apellido y CUIT. También acepta Nombre completo, Razón Social o Cliente, y columnas extra como Record ID. Separador coma o punto y coma. Para Excel, guardar como CSV.';
 
     const searchInput = document.createElement('input');
     searchInput.type = 'text';
@@ -940,20 +1021,20 @@
 
     syncControlsVisibility();
 
-    title.addEventListener('click', toggleControls);
-    searchInput.addEventListener('input', handleSearchInput);
-    searchInput.addEventListener('keydown', handleSearchKeydown);
-    select.addEventListener('change', handleSelectChange);
-    googleButton.addEventListener('click', configureGoogleSheetsCommand);
-    importButton.addEventListener('click', importCsvCommand);
-    refreshButton.addEventListener('click', () => {
+    listen(title, 'click', toggleControls);
+    listen(searchInput, 'input', handleSearchInput);
+    listen(searchInput, 'keydown', handleSearchKeydown);
+    listen(select, 'change', handleSelectChange);
+    listen(googleButton, 'click', configureGoogleSheetsCommand);
+    listen(importButton, 'click', importCsvCommand);
+    listen(refreshButton, 'click', () => {
       void handleRefresh();
     });
-    clearButton.addEventListener('click', clearConfigurationCommand);
-    formatButton.addEventListener('click', toggleFormatCommand);
-    saveConfigButton.addEventListener('click', saveGoogleSheetsFromPanel);
-    cancelConfigButton.addEventListener('click', hideConfigPanel);
-    configInput.addEventListener('keydown', (event) => {
+    listen(clearButton, 'click', clearConfigurationCommand);
+    listen(formatButton, 'click', toggleFormatCommand);
+    listen(saveConfigButton, 'click', saveGoogleSheetsFromPanel);
+    listen(cancelConfigButton, 'click', hideConfigPanel);
+    listen(configInput, 'keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
         saveGoogleSheetsFromPanel();
@@ -978,7 +1059,7 @@
   function updateHint() {
     if (!state.hint) return;
     const config = readConfig();
-    const dataset = readDataset();
+    const dataset = state.dataset;
 
     if (config.sourceMode === 'file' && dataset?.fileName) {
       state.hint.textContent = `Origen actual: CSV local (${dataset.fileName}). Para cambios, importa el archivo otra vez.`;
@@ -987,34 +1068,47 @@
 
     if (config.sourceMode === 'url' && config.sourceUrl) {
       try {
-        state.hint.textContent = `Origen actual: Google Sheets publico (${new URL(config.sourceUrl).hostname}).`;
+        const updatedAt = datasetMatchesConfig(config, dataset) && Number.isFinite(dataset.loadedAt)
+          ? ` Última actualización: ${new Date(dataset.loadedAt).toLocaleString('es-AR')}.`
+          : '';
+        state.hint.textContent = `Origen actual: Google Sheets público (${new URL(config.sourceUrl).hostname}).${updatedAt}`;
       } catch {
-        state.hint.textContent = 'La URL configurada necesita revision.';
+        state.hint.textContent = 'La URL configurada necesita revisión.';
       }
       return;
     }
 
-    state.hint.textContent = 'Configura un Google Sheets publico o importa un CSV local.';
+    state.hint.textContent = 'Configura un Google Sheets público o importa un CSV local.';
   }
 
   function setEntries(entries) {
     state.entries = Array.isArray(entries) ? entries : [];
   }
 
-  function renderMatches() {
+  function renderMatches({ preserveSelection = false, preserveInput = false } = {}) {
     if (!state.select || !state.inputField || !state.searchInput || !state.count) return;
 
     const searchText = state.searchInput.value.trim();
     const normalizedSearch = normalizeText(searchText);
     const cuitSearch = searchText.replace(/\D/g, '');
-    const lastSelectedCuit = readSelectedCuit();
+    const lastSelectedCuit = preserveInput
+      ? String(state.inputField.value || '').replace(/\D/g, '')
+      : readSelectedCuit();
 
-    const matches = state.entries.filter((entry) => {
-      if (!searchText) return true;
+    const matches = [];
+    let totalMatches = 0;
+    let preferredEntry = null;
+    for (const entry of state.entries) {
       const matchesName = normalizedSearch && entry.searchKey.includes(normalizedSearch);
       const matchesCuit = cuitSearch && entry.cuit.includes(cuitSearch);
-      return matchesName || matchesCuit;
-    });
+      if (searchText && !matchesName && !matchesCuit) continue;
+      totalMatches += 1;
+      if (matches.length < MAX_VISIBLE_MATCHES) matches.push(entry);
+      if (entry.cuit === lastSelectedCuit) preferredEntry = entry;
+    }
+    if (preferredEntry && !matches.some((entry) => entry.cuit === lastSelectedCuit)) {
+      matches[matches.length - 1] = preferredEntry;
+    }
 
     state.select.innerHTML = '';
 
@@ -1022,7 +1116,7 @@
       const option = new Option('No se encontraron coincidencias.', '', false, false);
       option.disabled = true;
       state.select.add(option);
-      applySelectedCuit('');
+      if (!preserveSelection && !preserveInput) applySelectedCuit('');
       state.count.textContent = '0 coincidencias';
       return;
     }
@@ -1038,16 +1132,18 @@
     const preferredIndex = matches.findIndex((entry) => entry.cuit === lastSelectedCuit);
     if (preferredIndex >= 0) {
       state.select.selectedIndex = preferredIndex + 1;
-      applySelectedCuit(state.select.options[state.select.selectedIndex].value);
-    } else if (searchText) {
+      if (!preserveInput) applySelectedCuit(state.select.options[state.select.selectedIndex].value);
+    } else if (searchText && !preserveInput) {
       state.select.selectedIndex = 1;
       applySelectedCuit(state.select.options[1].value);
     } else {
       state.select.selectedIndex = 0;
-      applySelectedCuit('');
+      if (!preserveInput) applySelectedCuit('');
     }
 
-    state.count.textContent = `${matches.length} coincidencia${matches.length === 1 ? '' : 's'}`;
+    state.count.textContent = totalMatches > matches.length
+      ? `${matches.length} de ${totalMatches} coincidencias. Refiná la búsqueda para ver otros clientes.`
+      : `${totalMatches} coincidencia${totalMatches === 1 ? '' : 's'}`;
   }
 
   function applySelectedCuit(cuit) {
@@ -1055,9 +1151,9 @@
     const normalizedCuit = String(cuit || '').replace(/\D/g, '');
     state.inputField.value = normalizedCuit;
     if (normalizedCuit) {
-      writeSelectedCuit(normalizedCuit);
+      if (readSelectedCuit() !== normalizedCuit) writeSelectedCuit(normalizedCuit);
     } else {
-      clearSelectedCuit();
+      if (readSelectedCuit()) clearSelectedCuit();
     }
     state.inputField.dispatchEvent(new Event('input', { bubbles: true }));
     state.inputField.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1101,7 +1197,7 @@
   async function handleRefresh() {
     const config = readConfig();
     if (config.sourceMode === 'file') {
-      updateStatus('Elegi el CSV actualizado para reimportarlo.', false);
+      updateStatus('Elegí el CSV actualizado para reimportarlo.', false);
       importCsvCommand();
       return;
     }
@@ -1110,7 +1206,7 @@
   }
 
   function datasetMatchesConfig(config, dataset) {
-    if (!dataset) return false;
+    if (!dataset || !Array.isArray(dataset.entries)) return false;
     if (config.sourceMode !== dataset.sourceMode) return false;
     if (config.sourceMode === 'url') return config.sourceUrl && config.sourceUrl === dataset.sourceUrl;
     return config.sourceMode === 'file' && Array.isArray(dataset.entries);
@@ -1118,40 +1214,62 @@
 
   function fetchRemoteText(url) {
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url,
-        anonymous: true,
-        timeout: 20_000,
-        headers: {
-          'Cache-Control': 'no-cache'
-        },
-        onload(response) {
-          if (response.status >= 200 && response.status < 300) {
-            resolve(response.responseText);
-            return;
-          }
-          reject(new Error(`La URL respondio con estado ${response.status}.`));
-        },
-        onerror() {
-          reject(new Error('Fallo la carga remota.'));
-        },
-        ontimeout() {
-          reject(new Error('La carga remota supero el tiempo limite.'));
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        if (state.pendingRequest === pending) state.pendingRequest = null;
+        callback(value);
+      };
+      let handle;
+      const pending = {
+        abort() {
+          finish(reject, new Error('La carga remota fue cancelada.'));
+          handle?.abort();
         }
-      });
+      };
+      state.pendingRequest = pending;
+      try {
+        handle = GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          anonymous: true,
+          timeout: 20_000,
+          headers: {
+            'Cache-Control': 'no-cache'
+          },
+          onload(response) {
+            if (response.status >= 200 && response.status < 300) {
+              finish(resolve, response.responseText);
+              return;
+            }
+            finish(reject, new Error(`La URL respondió con estado ${response.status}.`));
+          },
+          onerror() {
+            finish(reject, new Error('Falló la carga remota.'));
+          },
+          ontimeout() {
+            finish(reject, new Error('La carga remota superó el tiempo límite.'));
+          },
+          onabort() {
+            finish(reject, new Error('La carga remota fue cancelada.'));
+          }
+        });
+      } catch (error) {
+        finish(reject, error);
+      }
     });
   }
 
-  async function loadEntries(options) {
-    const token = ++state.requestToken;
+  async function loadEntries({ forceRefresh = false } = {}) {
+    const token = cancelPendingLoad();
     let config = readConfig();
-    const cachedDataset = readDataset();
+    const cachedDataset = state.dataset;
 
     updateHint();
 
     if (config.sourceMode === 'file') {
-      if (!cachedDataset?.entries?.length) {
+      if (!datasetMatchesConfig(config, cachedDataset) || !cachedDataset.entries.length) {
         setEntries([]);
         renderMatches();
         updateStatus('No hay CSV importado. Usa Importar CSV.', false);
@@ -1160,7 +1278,7 @@
       }
 
       setEntries(cachedDataset.entries);
-      renderMatches();
+      renderMatches({ preserveInput: hasManualInput() });
       updateStatus(`Datos locales listos (${cachedDataset.entries.length} registros).`, false);
       syncControlsVisibility();
       return;
@@ -1184,13 +1302,24 @@
     } catch (error) {
       setEntries([]);
       renderMatches();
-      updateStatus(error.message || 'La URL configurada no es valida.', true);
+      updateStatus(error.message || 'La URL configurada no es válida.', true);
       syncControlsVisibility();
+      return;
+    }
+
+    const hasCache = datasetMatchesConfig(config, cachedDataset) && cachedDataset.entries.length;
+    setEntries(hasCache ? cachedDataset.entries : []);
+    renderMatches({ preserveSelection: !hasCache, preserveInput: hasManualInput() });
+    syncControlsVisibility();
+    const cacheAge = Date.now() - cachedDataset?.loadedAt;
+    if (!forceRefresh && hasCache && Number.isFinite(cacheAge) && cacheAge >= 0 && cacheAge < CACHE_TTL_MS) {
+      updateStatus(`Lista guardada disponible (${cachedDataset.entries.length} registros). Se actualiza cada 24 horas o con Recargar.`, false);
       return;
     }
 
     setLoading(true);
     updateStatus('Actualizando Google Sheets...', false);
+    const inputAtRequest = state.inputField?.value;
 
     try {
       const remoteText = await fetchRemoteText(config.sourceUrl);
@@ -1208,24 +1337,26 @@
         loadedAt: Date.now(),
         entries
       });
+      updateHint();
       setEntries(entries);
-      renderMatches();
+      renderMatches({ preserveInput: state.inputField?.value !== inputAtRequest });
       updateStatus(`Google Sheets actualizado (${entries.length} registros).`, false);
       syncControlsVisibility();
     } catch (error) {
+      if (token !== state.requestToken) return;
       console.warn(`[${SCRIPT_ID}] Error cargando Google Sheets:`, error);
 
       if (datasetMatchesConfig(config, cachedDataset) && cachedDataset.entries.length) {
         setEntries(cachedDataset.entries);
-        renderMatches();
+        renderMatches({ preserveInput: state.inputField?.value !== inputAtRequest });
         updateStatus(
-          `Se uso cache anterior (${cachedDataset.entries.length} registros). ${error.message}`,
+          `Se usó la lista guardada (${cachedDataset.entries.length} registros). ${error.message}`,
           true
         );
         syncControlsVisibility();
       } else {
         setEntries([]);
-        renderMatches();
+        renderMatches({ preserveInput: state.inputField?.value !== inputAtRequest });
         updateStatus(error.message || 'No se pudieron cargar los datos remotos.', true);
         syncControlsVisibility();
       }
@@ -1240,6 +1371,11 @@
     if (!element || element.tagName !== 'INPUT') return false;
     const type = String(element.getAttribute('type') || 'text').toLowerCase();
     return ['', 'text', 'tel', 'search', 'number'].includes(type) && !element.disabled;
+  }
+
+  function hasManualInput() {
+    const value = String(state.inputField?.value || '').replace(/\D/g, '');
+    return Boolean(value && value !== readSelectedCuit());
   }
 
   function inputTextSignature(input) {
@@ -1274,6 +1410,13 @@
   }
 
   function destroy() {
+    cancelPendingLoad();
+    for (const { target, type, handler, options } of state.listeners) {
+      target.removeEventListener(type, handler, options);
+    }
+    state.listeners = [];
+    for (const input of state.fileInputs) input.remove();
+    state.fileInputs.clear();
     if (state.inputTimer) {
       clearTimeout(state.inputTimer);
       state.inputTimer = null;
@@ -1302,6 +1445,12 @@
       state.style.remove();
       state.style = null;
     }
+    for (const key of [
+      'searchInput', 'select', 'status', 'count', 'hint', 'configPanel', 'configInput',
+      'formatPanel', 'googleButton', 'importButton', 'refreshButton', 'clearButton',
+      'formatButton', 'inputField', 'dataset'
+    ]) state[key] = null;
+    state.entries = [];
   }
 
   function init() {
@@ -1315,12 +1464,10 @@
     if (!selectorInsertion.parent || !controlsInsertion.parent) return false;
 
     state.inputField = inputField;
+    state.dataset = readDataset();
     state.style = createStyle();
     buildUi(selectorInsertion, controlsInsertion);
-    setEntries([]);
-    renderMatches();
-    updateHint();
-    updateStatus('Cargando configuracion...', false);
+    updateStatus('Cargando configuración...', false);
     void loadEntries({ forceRefresh: false });
     return true;
   }
@@ -1347,11 +1494,9 @@
     bootstrap(0);
   }
 
-  window.addEventListener(
-    'pagehide',
-    () => {
-      destroy();
-    },
-    { once: true }
-  );
+  // These two lifecycle hooks stay active for back/forward cache restorations.
+  window.addEventListener('pagehide', destroy);
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted) bootstrap(0);
+  });
 })();
